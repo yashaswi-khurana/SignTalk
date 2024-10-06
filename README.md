@@ -1,6 +1,6 @@
 # SignTalk
 ## Link for PPT
-#### https://www.canva.com/design/DAGPtRlSULQ/uEHuTUTHPhfsd-v-uWuHYw/edit?utm_content=DAGPtRlSULQ&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
+#### https://www.canva.com/design/DAGSz8q7vmc/zsxkQAQ4Qlnt-PbHR9k7TA/edit?utm_content=DAGSz8q7vmc&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
 ## Overview
 This Python script implements a hand gesture recognition system using MediaPipe for hand tracking and a K-Nearest Neighbors (KNN) classifier for gesture recognition. The system allows for both static and dynamic gesture recording, classification, and management.
 
