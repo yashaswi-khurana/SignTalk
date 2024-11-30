@@ -3,13 +3,9 @@ import mediapipe as mp
 import numpy as np
 import os
 import pickle
-import time
-from sklearn.neural_network import MLPClassifier
+import tensorflow as tf
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_is_fitted
-from gtts import gTTS
-import tempfile
-import playsound
 
 # Initialize MediaPipe hands model
 mp_hands = mp.solutions.hands
@@ -17,6 +13,7 @@ mp_drawing = mp.solutions.drawing_utils
 
 # Path to save gesture data
 GESTURE_PATH = "gesture_data.pkl"
+DYNAMIC_GESTURE_PATH = "dynamic_gesture_data.pkl"
 
 # Load saved gestures or create empty list for gestures and labels
 if os.path.exists(GESTURE_PATH):
@@ -26,19 +23,37 @@ if os.path.exists(GESTURE_PATH):
 else:
     X, y = [], []
 
+# Load dynamic gestures or create empty lists for sequences
+if os.path.exists(DYNAMIC_GESTURE_PATH):
+    with open(DYNAMIC_GESTURE_PATH, 'rb') as f:
+        dynamic_gesture_data = pickle.load(f)
+    X_dynamic, y_dynamic = dynamic_gesture_data['landmarks'], dynamic_gesture_data['labels']
+else:
+    X_dynamic, y_dynamic = [], []
+
 # Initialize StandardScaler for normalization
 scaler = StandardScaler()
 
-# Initialize MLPClassifier for static gestures
-mlp = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=500, random_state=42)
+# Initialize Neural Network for static gestures
+model = None
 
-# Variables for gesture recognition
-last_recognized_gesture = None  # Track the last recognized gesture
-last_recognized_time = 0  # Timestamp of the last recognized gesture
-confidence_threshold = 0.98  # Minimum confidence to announce a gesture
+# Function to create and compile a neural network model
+def create_neural_network(input_shape, num_classes):
+    global model
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=input_shape),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(num_classes, activation='softmax')  # One output per class
+    ])
 
-# Function to train Neural Network model for static gestures
-def train_mlp_classifier(X, y):
+    model.compile(optimizer='adam',
+                  loss='sparse_categorical_crossentropy',
+                  metrics=['accuracy'])
+    print(model.summary())
+
+# Function to train the neural network for static gestures
+def train_neural_network(X, y):
     if len(y) < 3:
         print("Not enough data to train the model.")
         return
@@ -46,12 +61,18 @@ def train_mlp_classifier(X, y):
     # Fit the scaler on the training data and transform the data
     X_scaled = scaler.fit_transform(X)
 
-    # Train the MLP model
-    mlp.fit(X_scaled, y)
-    print("Model trained with", len(y), "samples.")
+    # Create and compile the neural network if it doesn't exist
+    num_classes = len(np.unique(y))  # Number of unique gestures
+    if model is None:
+        create_neural_network(input_shape=(X_scaled.shape[1],), num_classes=num_classes)
 
-# Function to classify static hand gesture using MLP
-def classify_gesture_mlp(landmarks):
+    # Train the neural network
+    y = np.array(y)  # Ensure labels are in NumPy array format
+    model.fit(X_scaled, y, epochs=50, batch_size=8, verbose=1)
+    print("Neural network trained with", len(y), "samples.")
+
+# Function to classify static hand gesture using the neural network
+def classify_gesture_nn(landmarks):
     landmarks = np.array(landmarks).flatten().reshape(1, -1)  # Reshape to 2D
     try:
         # Ensure scaler is fitted
@@ -60,32 +81,12 @@ def classify_gesture_mlp(landmarks):
         # Scale the input landmarks
         landmarks_scaled = scaler.transform(landmarks)
 
-        # Check if the MLP model is fitted
-        check_is_fitted(mlp)
-
-        # Predict the probabilities
-        probabilities = mlp.predict_proba(landmarks_scaled)[0]
-        max_confidence_index = np.argmax(probabilities)
-        confidence = probabilities[max_confidence_index]
-        predicted_label = mlp.classes_[max_confidence_index]
-        return predicted_label, confidence
+        # Predict gesture with the trained neural network
+        predictions = model.predict(landmarks_scaled)
+        predicted_class = np.argmax(predictions, axis=1)[0]
+        return predicted_class
     except Exception as e:
-        return f"Error: {str(e)}", 0.0
-
-# Function to speak the recognized gesture using gTTS
-def speak_gesture(gesture_name):
-    try:
-        # Generate speech
-        tts = gTTS(text=gesture_name, lang='en')
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio_file:
-            tts.save(temp_audio_file.name)
-            # Play the generated audio
-            playsound.playsound(temp_audio_file.name)
-        # Clean up the temporary file
-        os.unlink(temp_audio_file.name)
-    except Exception as e:
-        print(f"Error in text-to-speech: {e}")
+        return f"Error: {str(e)}"
 
 # Function to record new static gestures
 def record_custom_gesture(landmarks, gesture_name):
@@ -99,11 +100,14 @@ def record_custom_gesture(landmarks, gesture_name):
 
     print(f"Custom gesture '{gesture_name}' saved!")
 
-    # Retrain the model with new data
-    train_mlp_classifier(X, y)
+    # Retrain the neural network with new data
+    train_neural_network(X, y)
 
 # Start webcam feed
 cap = cv2.VideoCapture(0)
+sequence = []  # Store dynamic gesture landmarks sequence
+recording_dynamic = False  # Flag to indicate dynamic gesture recording
+frame_count = 0  # Frame counter for dynamic gestures
 
 with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7) as hands:
     while cap.isOpened():
@@ -129,35 +133,15 @@ with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7) a
                 # Convert to NumPy array
                 landmarks = np.array(landmarks).flatten()
 
-                # Static gesture recognition using MLP if the model is trained
-                recognized_gesture, confidence = classify_gesture_mlp(landmarks)
-
-                # Check if confidence is above threshold and gesture has changed
-                if (
-                    confidence > confidence_threshold
-                    and recognized_gesture != last_recognized_gesture
-                ):
-                    last_recognized_gesture = recognized_gesture
-                    last_recognized_time = time.time()
-                    speak_gesture(recognized_gesture)
-                    print(f"Recognized: {recognized_gesture} (Confidence: {confidence:.2f})")
-
-                # Display the recognized gesture and confidence on the frame
-                cv2.putText(
-                    frame,
-                    f"{recognized_gesture} ({confidence:.2f})",
-                    (10, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 255, 0),
-                    2,
-                )
+                # Static gesture recognition using Neural Network
+                recognized_gesture = classify_gesture_nn(landmarks)
+                cv2.putText(frame, str(recognized_gesture), (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
         cv2.imshow('Sign Language Recognition', frame)
 
         # Press 'c' to capture and create a static gesture
         if cv2.waitKey(1) & 0xFF == ord('c'):
-            gesture_name = input("Enter static gesture name: ")
+            gesture_name = int(input("Enter static gesture label (integer): "))
             if result.multi_hand_landmarks:
                 for hand_landmarks in result.multi_hand_landmarks:
                     landmarks = []
